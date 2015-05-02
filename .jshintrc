@@ -14,5 +14,6 @@
   "quotmark": "single",
   "regexp": true,
   "unused": true,
-  "undef": true
+  "undef": true,
+  "esnext": true
 }
