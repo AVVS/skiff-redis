@@ -44,7 +44,6 @@ describe('standalone client', function() {
 
   it('allows getting', {timeout: 4e3}, function(done) {
     client.get('key', function(err, value) {
-      console.log("GET:", err, value, value === 'value');
 
       if (err) {
         throw err;
