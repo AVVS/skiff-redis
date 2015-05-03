@@ -35,7 +35,8 @@
     "msgpack5": "^2.1.0",
     "neo-async": "^1.0.1",
     "propagate": "^0.3.1",
-    "skiff-algorithm": "^0.8.2"
+    "skiff-algorithm": "^0.8.2",
+    "skiff-tcp-msgpack": "^0.8.3"
   },
   "devDependencies": {
     "babel": "^5.2.6",
