@@ -38,6 +38,7 @@
   },
   "devDependencies": {
     "babel": "^5.2.6",
+    "concat-stream": "^1.4.8",
     "lab": "^5.8.0"
   }
 }
