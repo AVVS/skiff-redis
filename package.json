@@ -1,11 +1,12 @@
 {
   "name": "skiff-redis",
-  "version": "0.2.1",
-  "description": "Implementation of skiff protocol with redis persistance layer",
+  "version": "0.2.2",
+  "description": "Implementation of skiff protocol with redis persistence layer",
   "main": "./lib/index.js",
   "scripts": {
     "prepublish": "make",
-    "test": "make && node ./test/index.js"
+    "test": "make && lab -a assert -v tests/standalone.js && lab -a assert -v tests/networking.js && lab -a assert -v tests/resilience.js && lab -a assert -v tests/replication.js",
+    "test-persistence": "make && node ./tests/index.js"
   },
   "repository": {
     "type": "git",
@@ -25,14 +26,20 @@
   "homepage": "https://github.com/AVVS/skiff-redis#readme",
   "dependencies": {
     "abstract-skiff-persistence": "^0.8.0",
+    "batch-write-stream": "^0.1.6",
+    "bluebird": "^2.9.25",
     "from": "^0.1.3",
     "ioredis": "^1.1.3",
     "lodash": "^3.8.0",
+    "ltgt": "^2.1.0",
     "msgpack5": "^2.1.0",
-    "readable-stream": "~1.0.x",
-    "neo-async": "^1.0.1"
+    "neo-async": "^1.0.1",
+    "skiff-algorithm": "^0.8.2"
   },
   "devDependencies": {
-    "babel": "^5.2.6"
+    "babel": "^5.2.6",
+    "lab": "^5.8.0",
+    "mkdirp": "^0.5.0",
+    "rimraf": "^2.3.3"
   }
 }

@@ -4,7 +4,7 @@ var test = require('abstract-skiff-persistence/test/all');
 
 var Redis = require('ioredis');
 var redis = new Redis();
-var SkiffRedisPersistence = require('../lib');
+var SkiffRedisPersistence = require('../lib/persistence');
 var p = new SkiffRedisPersistence({ redis: redis });
 
 var options = {

@@ -1,280 +1,282 @@
 'use strict';
 
-import msgpack5 from 'msgpack5';
-import SkiffPersistence from 'abstract-skiff-persistence';
+import SkiffNode from 'skiff-algorithm';
+import SkiffRedis from './persistence.js';
+
+// options
+import defaultOptions from './default_options';
+import { EventEmitter } from 'events';
 import _ from 'lodash';
+import propagate from 'propagate';
 import async from 'neo-async';
-import { Writable } from 'readable-stream';
-import From from 'from';
+import Redis from 'ioredis';
+import * as transports from './transport.js';
 
-let msgpack = msgpack5();
+let beforeLeaderOps = ['listen', 'waitLeader', 'close'];
 
-function encode(val) {
-  return msgpack.encode(val).slice();
-}
+class SkiffClient extends EventEmitter {
 
-function decode(buf) {
-  return msgpack.decode(buf);
-}
+    constructor(id, options={}) {
+        super();
 
-class SkiffRedisWritable extends Writable {
-
-    constructor(stateKey, redis) {
-        super({ objectMode: true });
-        this._key = stateKey;
-        this._redis = redis;
-        this._redis.on('error', this._onError);
-        this.on('finish', this.destroy);
-    }
-
-    _onError(err) {
-        this.emit('error', err);
-        this.destroy();
-    }
-
-    _write(operation, enc, next) {
-        switch (operation.type) {
-            case 'del':
-                this._redis.hdel(this._key, operation.key, next);
-                break;
-
-            case 'put':
-                this._redis.hset(this._key, operation.key, encode(operation.value), next);
-                break;
-        }
-    }
-
-    destroy() {
-        this.removeListener('finish', this.destroy);
-        this._redis.removeListener('error', this._onError);
-        this._redis = null;
-        this._key = null;
-    }
-
-}
-
-class SkiffRedis extends SkiffPersistence {
-
-    constructor(options={}) {
-
-        super(options);
-
-        let { redis, namespace } = options;
-
-        // in case we use redis cluster, make sure that namespace is hashed
-        this._namespace = namespace || '{skiff-redis}';
-
-        this._redis = redis;
-
-        this._redis.on('error', this._onError);
-
-        this.nodes = {};
-    }
-
-    _onError(err) {
-        this.emit('error', err);
-    }
-
-    _key(...parts) {
-        if (parts.length === 0) {
-            throw new Error('parts must include at least one value');
+        if (!id) {
+            throw new Error('node id must be defined');
         }
 
-        return this._namespace + parts.join('~');
-    }
+        _.bindAll(this, [ '_listening', '_work' ]);
 
-    _saveMeta(nodeId, state, callback) {
-        let redis = this._redis;
-        let pipeline = redis.pipeline();
-        let log = state.log;
-        let logEntries = log.entries;
+        this.id = id;
 
-        // do not enter hashtable mode
-        state.log = _.omit(log, ['entries']);
+        this._options = _.extend({}, defaultOptions, options);
 
-        pipeline.set(this._key(nodeId, 'meta'), encode(state));
+        let redisOpts = this._options.redisClient;
 
-        let minLogIndex = logEntries.length && logEntries[0].index || 0;
-        let maxLogIndex = logEntries.length && logEntries[logEntries.length - 1].index || Infinity;
-        let logNamespace = this._key(nodeId, 'logs');
-        let cursor = 0;
-        let maxReadIndex = 0;
-
-        async.doUntil(
-            function zscanRedis(next) {
-                redis.zscanBuffer(logNamespace, cursor, 'count', 10, function zscanResponse(err, response) {
-                    if (err) {
-                        return next(err);
-                    }
-
-                    // update cursor
-                    cursor = parseInt(response[0], 10);
-
-                    // process log entries
-                    let entries = response[1];
-                    for (let i = 0, l = entries.length; i < l; i += 2) {
-                        let index = parseInt(entries[i + 1], 10);
-                        let entry = entries[i];
-
-                        if (index > maxReadIndex) {
-                            maxReadIndex = index;
-                        }
-
-                        if (index < minLogIndex || index > maxLogIndex) {
-                            pipeline.zrem(logNamespace, entry);
-                        } else {
-                            let correspondingNewEntry = logEntries[index - minLogIndex];
-                            let decodedEntry = decode(entry);
-
-                            if (correspondingNewEntry.uuid !== decodedEntry.uuid) {
-                                pipeline.zrem(logNamespace, entry);
-                                pipeline.zadd(logNamespace, correspondingNewEntry.index, encode(correspondingNewEntry));
-                            }
-                        }
-
-                    }
-
-                    next();
-
-                });
-            },
-
-            function isIterationComplete() {
-                return cursor === 0;
-            },
-
-            function saveMeta(err) {
-                if (err) {
-                    return callback(err);
+        if (!(redisOpts instanceof Redis)) {
+            if (Array.isArray(redisOpts)) {
+                switch (redisOpts.length) {
+                    case 0:
+                    case 1:
+                        this._options.redisClient = new Redis(redisOpts[0]);
+                        break;
+                    case 2:
+                        this._options.redisClient = new Redis(redisOpts[0], redisOpts[1]);
+                        break;
+                    default:
+                        this._options.redisClient = new Redis(redisOpts[0], redisOpts[1], redisOpts[2]);
+                        break;
                 }
-
-                if (maxReadIndex < maxLogIndex) {
-                    logEntries.slice(maxReadIndex - minLogIndex + 1).forEach(function (entry) {
-                        pipeline.zadd(logNamespace, entry.index, encode(entry));
-                    });
-                }
-
-                pipeline.exec(callback);
-            }
-
-        );
-    }
-
-    _loadMeta(nodeId, callback) {
-
-        this._redis
-            .pipeline()
-            .getBuffer(this._key(nodeId, 'meta'))
-            .zrangebyscoreBuffer(this._key(nodeId, 'logs'), '-inf', '+inf')
-            .exec(function (___, results) {
-                // err is always null
-
-                let [err, meta] = results[0];
-                let [logerr, logEntries] = results[1];
-
-                if (err || logerr) {
-                    return callback(err || logerr);
-                }
-
-                if (meta) {
-                    meta = decode(meta);
-                    meta.log.entries = logEntries.map(decode);
-                }
-
-                callback(null, meta);
-
-            });
-
-    }
-
-    _applyCommand(nodeId, commitIndex, command, callback) {
-        let stateKey = this._key(nodeId, 'state');
-        let commitKey = this._key(nodeId, 'commitIndex');
-        let pipeline = this._redis.pipeline();
-
-        function mapCommand(op) {
-            switch (op.type) {
-                case 'put':
-                    pipeline.hset(stateKey, op.key, encode(op.value));
-                    break;
-                case 'del':
-                    pipeline.hdel(stateKey, op.key);
-                    break;
+            } else {
+                this._options.redisClient = new Redis(redisOpts);
             }
         }
 
-        if (command.type === 'batch' && command.operations) {
-            command.operations.forEach(mapCommand);
-        } else {
-            mapCommand(command);
-        }
+        this._db = new SkiffRedis({ namespace: this._options.namespace, redis: this._options.redisClient });
+        this._options.id = id;
+        this._options.persistence = this._db;
+        this._options.transport = new (transports.resolve(this._options.transport))();
+        this.node = new SkiffNode(this._options);
 
-        pipeline.set(commitKey, commitIndex);
+        propagate(this.node, this);
 
-        pipeline.exec(callback);
-    }
-
-    _lastAppliedCommitIndex(nodeId, callback) {
-        this._redis.get(this._key(nodeId, 'commitIndex')).then(Number).nodeify(callback);
-    }
-
-    _saveCommitIndex(nodeId, commitIndex, callback) {
-        this._redis.set(this._key(nodeId, 'commitIndex'), commitIndex, callback);
-    }
-
-    _createReadStream(nodeId) {
-        let stateKey = this._key(nodeId, 'state');
-        let redis = this._redis;
-        let cursor = 0;
-        let readable = From(function getChunk(count, next) {
-
-            redis.hscanBuffer(stateKey, cursor, 'count', count || 10, (err, response) => {
-                if (err) {
-                    this.emit('error', err);
-                    this.destroy();
-                    return next();
-                }
-
-                cursor = parseInt(response[0], 10);
-
-                // hash
-                let sets = response[1];
-
-                for (let i = 0, l = sets.length; i < l; i += 2) {
-                    let hashKey = sets[i];
-                    let hashValue = decode(sets[i + 1]);
-
-                    this.emit('data', { key: hashKey.toString(), value: hashValue });
-                }
-
-                if (cursor === 0) {
-                    this.emit('end');
-                }
-
-                next();
-
-            });
-
+        this.node.on('error', (err) => {
+            this.emit('error', err);
         });
 
-        return readable;
+        // propagate certain persistence layer events
+        this._options.persistence.on('error', (err) => {
+            this.emit('error', err);
+        });
+
+        // propagate certain transport layer events
+        this._options.transport.on('error', (err) => {
+            this.emit('error', err);
+        });
+
+        // queue
+        this.queue = async.queue(this._work, 1);
+
+        if (this._options.autoListen) {
+            this.queue.push({ op: 'listen', args: [ this._listening ] });
+        }
+
+        this.queue.push({ op: 'waitLeader' });
     }
 
-    _createWriteStream(nodeId) {
-        return new SkiffRedisWritable(this._key(nodeId, 'state'), this._redis);
+    // Public API
+
+    put(key, value, ...opts) {
+        let callback = opts.pop();
+        let options = opts.pop();
+
+        this.queue.push({
+            op: 'put',
+            args: [ key, value, options, callback ]
+        });
     }
 
-    _removeAllState(nodeId, callback) {
-        this._redis.del(this._key(nodeId, 'state'), callback);
+    del(key, ...opts) {
+        let callback = opts.pop();
+        let options = opts.pop();
+
+        this.queue.push({
+            op: 'del',
+            args: [ key, options, callback ]
+        });
+    }
+
+    batch(ops, ...opts) {
+        let callback = opts.pop();
+        let options = opts.pop();
+
+        this.queue.push({
+            op: 'batch',
+            args: [ ops, options, callback ]
+        });
+    }
+
+    get(key, ...opts) {
+        let callback = opts.pop();
+        let options = opts.pop();
+
+        this.queue.push({
+            op: 'get',
+            args: [ key, options, callback ]
+        });
+    }
+
+    iterator(options) {
+
+    }
+
+    createReadStream(options) {
+        return this._db._createReadStream(this.node.id, options);
+    }
+
+    createWriteStream(options) {
+        return this._db._createWriteStream(this.node.id, options);
+    }
+
+    join(node, ...opts) {
+        let callback = opts.pop();
+        let metadata = opts.pop() || null;
+
+        this.node.join(node, metadata, callback);
+    }
+
+    leave(node, callback) {
+        this.node.leave(node, callback);
+    }
+
+    peerMeta(node) {
+        this.node.peerMeta(node);
+    }
+
+    listen(callback) {
+        this.node.listen(this.node.id, (err) => {
+            if (err) {
+                if (typeof callback === 'function') {
+                    callback(err);
+                } else {
+                    this.emit('error', err);
+                }
+                return;
+            }
+
+            if (typeof callback === 'function') {
+                callback();
+            }
+        });
+    }
+
+    close(callback) {
+        this.queue.push({
+            op: 'close',
+            args: [callback]
+        });
+    }
+
+    open(callback) {
+        this._waitLeader(callback);
+    }
+
+    // Private API
+
+    _listening(err) {
+        if (err) {
+            this.emit('error', err);
+        }
+    }
+
+    _work(item, next) {
+        let method = '_' + item.op;
+        let args = item.args || [];
+        let appCallback = args[args.length - 1];
+        let typeofAppCallback = typeof appCallback;
+
+        if (typeofAppCallback === 'function' || typeofAppCallback === 'undefined') {
+            args.pop();
+        } else {
+            appCallback = undefined;
+        }
+
+        let callback = function () {
+            if (appCallback) {
+                appCallback.apply(null, arguments);
+            }
+
+            setImmediate(next);
+        };
+
+
+        if (beforeLeaderOps.indexOf(item.op) == -1 && this.node.state.name !== 'leader') {
+            let err = new Error(item.op + ' operation requires being the leader');
+            err.leader = this.node.currentLeader();
+            return callback(err);
+        }
+
+        args.push(callback);
+        this[method].apply(this, args);
+
+    }
+
+    _listen(callback) {
+        this.listen(callback);
+    }
+
+    _waitLeader(next) {
+        next = _.once(next);
+
+        if (this.node.state.name === 'leader' || this._options.standby) {
+            next();
+        } else {
+            setTimeout(next, this._options.waitLeaderTimeout);
+            this.node.once('leader', next);
+        }
+    }
+
+    _put(key, value, options, next) {
+        this.node.command({
+            type: 'put',
+            key: key,
+            value: value
+        }, options, next);
+    }
+
+    _del(key, options, next) {
+        this.node.command({
+            type: 'del',
+            key: key
+        }, options, next);
+    }
+
+    _get(key, options, next) {
+        // this is not a typical command, we do not mutate state here
+        // therefore we wire the method right here
+        return this._db.get(this.node.id, key, next);
+    }
+
+    _batch(operations, options, next) {
+        this.node.command({
+            type: 'batch',
+            operations: operations,
+            options: options
+        }, options, next);
     }
 
     _close(callback) {
-        this._redis.disconnect();
-        this._redis.removeListener('error', this._onError);
-        callback();
+        this.node.close(err => {
+            if (err) {
+                if (typeof callback === 'function') {
+                    callback(err);
+                } else {
+                    this.emit('error', err);
+                }
+            }
+
+            this._db.close(callback);
+        });
     }
 
 }
 
-
-export default SkiffRedis;
+export default SkiffClient;
