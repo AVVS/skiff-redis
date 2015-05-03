@@ -1,6 +1,6 @@
 {
   "name": "skiff-redis",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Implementation of skiff protocol with redis persistence layer",
   "main": "./lib/index.js",
   "scripts": {
@@ -38,8 +38,6 @@
   },
   "devDependencies": {
     "babel": "^5.2.6",
-    "lab": "^5.8.0",
-    "mkdirp": "^0.5.0",
-    "rimraf": "^2.3.3"
+    "lab": "^5.8.0"
   }
 }
