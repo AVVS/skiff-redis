@@ -1,6 +1,7 @@
 # skiff-redis
 
 [![Build Status](https://travis-ci.org/AVVS/skiff-redis.svg?branch=master)](https://travis-ci.org/AVVS/skiff-redis)
+[![Dependency Status](https://david-dm.org/AVVS/skiff-redis.svg)](https://david-dm.org/AVVS/skiff-redis)
 
 Implementation of redis-backed skiff persistence layer.
 Original abstract class is located here: https://github.com/pgte/abstract-skiff-transport
